@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: hivtb-ai-service
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: INTERNAL_API_KEY
+        generateValue: true

@@ -8,3 +8,6 @@ env/
 *.egg-info/
 dist/
 .pytest_cache/
+# app/ml/trained/*.pkl  — kept in repo so Docker builds include the trained model
+logs/
+documentation/
