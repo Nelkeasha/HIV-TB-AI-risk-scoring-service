@@ -39,6 +39,8 @@ from app.core.database import SessionLocal, Base
 from app.models.patient import Patient
 from app.models.home_visit import HomeVisit
 from app.models.medication_record import MedicationRecord
+from app.models.confirmation_log import ConfirmationLog
+from app.models.ai_risk_score import AiRiskScore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,7 +93,7 @@ def get_spring_jwt() -> str:
     resp = httpx.post(
         f"{settings.spring_boot_base_url}/api/auth/login",
         json={"email": settings.spring_admin_email, "password": settings.spring_admin_password},
-        timeout=15,
+        timeout=90,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -439,7 +441,7 @@ def _notify_spring_boot(
             f"{settings.spring_boot_base_url}/api/internal/sync/logs/{log_id}/complete",
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
+            timeout=90,
         )
         resp.raise_for_status()
         log.info(
