@@ -8,12 +8,16 @@ class Settings(BaseSettings):
 
     risk_score_threshold_high: int = 70
     risk_score_threshold_critical: int = 85
-    stock_warning_days: int = 14
     cluster_min_patients: int = 3
     cluster_decline_percentage: int = 20
 
     nightly_risk_score_hour: int = 23
     morning_priority_list_hour: int = 6
+
+    # FHIR sync
+    fhir_server_url: str = "http://localhost:8090/fhir"
+    spring_admin_email: str = ""
+    spring_admin_password: str = ""
 
     model_config = {"env_file": ".env"}
 
