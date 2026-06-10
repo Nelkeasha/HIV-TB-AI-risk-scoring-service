@@ -9,9 +9,9 @@ class Alert(Base):
 
     id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id      = Column(UUID(as_uuid=True), ForeignKey("patients.id"))
-    chw_id          = Column(UUID(as_uuid=True), ForeignKey("chws.id"))
-    provider_id     = Column(UUID(as_uuid=True), ForeignKey("facility_providers.id"))
-    supervisor_id   = Column(UUID(as_uuid=True), ForeignKey("supervisors.id"))
+    chw_id          = Column(UUID(as_uuid=True))
+    provider_id     = Column(UUID(as_uuid=True))
+    supervisor_id   = Column(UUID(as_uuid=True))
     alert_type      = Column(String(30), nullable=False)
     severity        = Column(String(20), nullable=False)
     title           = Column(String(200), nullable=False)
