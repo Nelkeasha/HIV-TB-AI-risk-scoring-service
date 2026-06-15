@@ -39,8 +39,6 @@ from app.core.database import SessionLocal, Base
 from app.models.patient import Patient
 from app.models.home_visit import HomeVisit
 from app.models.medication_record import MedicationRecord
-from app.models.confirmation_log import ConfirmationLog
-from app.models.ai_risk_score import AiRiskScore
 
 logging.basicConfig(
     level=logging.INFO,
