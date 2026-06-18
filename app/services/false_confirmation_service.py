@@ -71,14 +71,14 @@ def analyze(patient_id, schedule_id, response_time_seconds: int,
         .order_by(ConfirmationLog.created_at.desc())
         .first()
     )
-    alert_created = False
+    alert = None
     if log:
         log.ai_suspicion_flag = is_suspicious
         log.suspicion_reason  = "; ".join(signals) if signals else None
         db.commit()
 
         if is_suspicious:
-            alert_utils.create_alert(
+            alert = alert_utils.create_alert(
                 db,
                 alert_type = "FALSE_CONFIRMATION",
                 severity   = "WARNING",
@@ -87,7 +87,6 @@ def analyze(patient_id, schedule_id, response_time_seconds: int,
                 patient_id = patient_id,
                 chw_id     = last_visit.chw_id if last_visit else None,
             )
-            alert_created = True
 
     recommended = (
         "Verify with CHW home visit." if is_suspicious
@@ -101,5 +100,8 @@ def analyze(patient_id, schedule_id, response_time_seconds: int,
         "suspicion_score":      suspicion_score,
         "signals_triggered":    signals,
         "recommended_action":   recommended,
-        "ai_suspicion_flag_set": alert_created,
+        "alert_id":             str(alert.id) if alert else None,
+        "alert_title":          alert.title if alert else None,
+        "alert_message":        alert.message if alert else None,
+        "alert_created_at":     alert.created_at.isoformat() if alert else None,
     }

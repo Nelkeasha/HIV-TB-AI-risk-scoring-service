@@ -19,18 +19,24 @@ logger = logging.getLogger(__name__)
 
 
 def correlate(patient_id, db: Session) -> dict:
+    """MedicationRecord rows are daily-granularity (one per patient per plan per
+    day). Evaluating against a single day is noisy — one missed dose reads as
+    0% adherence and would fire Pattern B every night. Aggregate the last 7
+    daily rows into a rolling week instead, matching the 80%/60% thresholds
+    these patterns were designed around."""
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise ValueError(f"Patient {patient_id} not found")
 
-    record = (
+    records = (
         db.query(MedicationRecord)
         .filter(MedicationRecord.patient_id == patient_id)
         .order_by(MedicationRecord.period_end.desc())
-        .first()
+        .limit(7)
+        .all()
     )
 
-    if not record:
+    if not records:
         return {
             "patient_id":             str(patient_id),
             "patient_name":           patient.full_name,
@@ -42,8 +48,11 @@ def correlate(patient_id, db: Session) -> dict:
             "recommended_action":     "Ensure CHW completes medication records.",
         }
 
-    adherence_pct   = float(record.adherence_pct)
-    false_flag      = bool(record.false_confirmation_flag)
+    total_scheduled = sum(r.doses_scheduled for r in records)
+    total_confirmed = sum(r.doses_confirmed for r in records)
+    total_verified  = sum(r.doses_verified for r in records)
+    adherence_pct   = (total_confirmed / total_scheduled * 100) if total_scheduled else 0.0
+    false_flag      = any(r.false_confirmation_flag for r in records)
     pattern         = "NONE"
     description     = "Adherence and verification data are consistent."
     alert_created   = False
@@ -69,7 +78,7 @@ def correlate(patient_id, db: Session) -> dict:
         alert_created = True
 
     # Pattern B: low digital adherence but verified doses show patient IS taking medication
-    elif adherence_pct < 60 and record.doses_verified >= record.doses_confirmed:
+    elif adherence_pct < 60 and total_verified >= total_confirmed:
         pattern     = "B"
         description = (
             f"Patient's digital adherence is {adherence_pct:.0f}%, but CHW pill "

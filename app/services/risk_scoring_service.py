@@ -6,10 +6,28 @@ from app.models.home_visit import HomeVisit
 from app.ml.features import risk_features
 from app.ml.models import risk_model
 from app.utils import alert_utils
+from app.services import settings_service
 from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+MODERATE_FLOOR = 40.0  # below this is LOW; no admin setting for this boundary today
+
+
+def _apply_threshold_overrides(score: float, db: Session) -> str:
+    """The trained classifier's LOW/MODERATE/HIGH/CRITICAL buckets are fixed at
+    training time and ignore admin-configured thresholds. Re-bucket using the
+    continuous score against system_settings so the admin's sliders actually
+    change classification, not just display text."""
+    thresholds = settings_service.get_thresholds(db)
+    if score >= thresholds["critical_risk_threshold"]:
+        return "CRITICAL"
+    if score >= thresholds["high_risk_threshold"]:
+        return "HIGH"
+    if score >= MODERATE_FLOOR:
+        return "MODERATE"
+    return "LOW"
 
 
 def _recommended_action(risk_level: str, features: dict) -> str:
@@ -42,6 +60,7 @@ def calculate(patient_id, db: Session) -> dict:
     features    = risk_features.extract(patient_id, db)
     counts      = risk_features.missed_counts(patient_id, db)
     score, level = risk_model.predict(features)
+    level       = _apply_threshold_overrides(score, db)
     pill_disc   = _pill_discrepancy_detected(patient_id, db)
 
     recommended = _recommended_action(level, features)

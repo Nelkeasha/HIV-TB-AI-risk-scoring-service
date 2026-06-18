@@ -17,6 +17,7 @@ from app.services import (
     risk_scoring_service,
     priority_list_service,
     cluster_detection_service,
+    clinical_correlation_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,26 @@ def _run_morning_priority_lists():
         db.close()
 
 
+def _run_nightly_clinical_correlation():
+    logger.info("Nightly clinical correlation job started")
+    db = SessionLocal()
+    try:
+        patients = db.query(Patient).filter(Patient.is_active == True).all()
+        ok, err, flagged = 0, 0, 0
+        for p in patients:
+            try:
+                result = clinical_correlation_service.correlate(p.id, db)
+                ok += 1
+                if result["pattern"] != "NONE":
+                    flagged += 1
+            except Exception as e:
+                logger.warning("Clinical correlation failed for %s: %s", p.full_name, e)
+                err += 1
+        logger.info("Nightly clinical correlation done — ok=%d errors=%d flagged=%d", ok, err, flagged)
+    finally:
+        db.close()
+
+
 def _run_cluster_detection():
     logger.info("Cluster detection job started")
     db = SessionLocal()
@@ -84,6 +105,12 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
     scheduler.add_job(
+        _run_nightly_clinical_correlation,
+        CronTrigger(hour=settings.nightly_risk_score_hour, minute=30),
+        id="nightly_clinical_correlation",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         _run_cluster_detection,
         CronTrigger(hour="*/6"),
         id="cluster_detection_6h",
@@ -92,7 +119,8 @@ def start_scheduler() -> BackgroundScheduler:
 
     scheduler.start()
     logger.info(
-        "Scheduler started — risk@%d:00, priority@%d:00, clusters@every 6h",
+        "Scheduler started — risk@%d:00, correlation@%d:30, priority@%d:00, clusters@every 6h",
+        settings.nightly_risk_score_hour,
         settings.nightly_risk_score_hour,
         settings.morning_priority_list_hour,
     )

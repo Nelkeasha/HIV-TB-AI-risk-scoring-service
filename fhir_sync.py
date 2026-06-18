@@ -39,6 +39,11 @@ from app.core.database import SessionLocal, Base
 from app.models.patient import Patient
 from app.models.home_visit import HomeVisit
 from app.models.medication_record import MedicationRecord
+# Imported (unused directly) so SQLAlchemy can resolve Patient's string-based
+# relationship() targets when this script runs standalone, outside the FastAPI
+# app's startup where all models normally get registered together.
+from app.models.confirmation_log import ConfirmationLog  # noqa: F401
+from app.models.ai_risk_score import AiRiskScore  # noqa: F401
 
 logging.basicConfig(
     level=logging.INFO,

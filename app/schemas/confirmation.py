@@ -19,4 +19,7 @@ class ConfirmationAnalysisResponse(BaseModel):
     suspicion_score: int        # 0–3 (one point per signal triggered)
     signals_triggered: list[str]
     recommended_action: str
-    ai_suspicion_flag_set: bool
+    alert_id: UUID | None = None
+    alert_title: str | None = None
+    alert_message: str | None = None
+    alert_created_at: datetime | None = None
