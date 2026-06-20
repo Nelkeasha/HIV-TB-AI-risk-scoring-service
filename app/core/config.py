@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     spring_admin_email: str = ""
     spring_admin_password: str = ""
 
+    # FHIR lab-result correlation (REQ-13) — LOINC codes polled per patient.
+    # Defaults are standard LOINC codes; override if your FHIR test data uses different ones.
+    loinc_viral_load: str = "25836-8"   # HIV 1 RNA [#/volume] (viral load) in Plasma
+    loinc_cd4_count: str = "24467-3"    # CD4 cells [#/volume] in Blood
+    lab_sync_lookback_days: int = 90    # how far back to look for Observations on first poll
+
     model_config = {"env_file": ".env"}
 
 

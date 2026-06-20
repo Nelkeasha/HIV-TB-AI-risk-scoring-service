@@ -1,21 +1,57 @@
 """
-Correlates self-reported adherence with CHW-verified pill counts.
+Correlates self-reported adherence with CHW-verified pill counts and FHIR lab results.
 
 Pattern A — High reported adherence (>= 80%) BUT false_confirmation_flag = True
             Suggests patient is confirming doses they did not take.
 
 Pattern B — Low confirmed adherence (< 60%) BUT CHW pill count is consistent
             Suggests the patient is taking medication but not confirming digitally.
+
+Pattern C — High reported adherence (>= 80%) BUT lab trend is worsening
+            (rising HIV viral load, or falling CD4 count). Suggests possible
+            treatment failure or drug resistance despite reported adherence —
+            pill-count verification alone wouldn't catch this (REQ-13).
 """
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from app.core.config import settings
 from app.models.patient import Patient
 from app.models.medication_record import MedicationRecord
+from app.models.lab_result import LabResult
 from app.utils import alert_utils
 import logging
 
 logger = logging.getLogger(__name__)
+
+# For viral load, a rising value is worsening. For CD4 count, a falling
+# value is worsening. Each entry: (loinc_code, label, "rising" | "falling").
+_LAB_WORSENING_DIRECTION = [
+    (settings.loinc_viral_load, "HIV viral load", "rising"),
+    (settings.loinc_cd4_count, "CD4 count", "falling"),
+]
+
+
+def _worsening_lab_trend(patient_id, db: Session) -> str | None:
+    """Returns a human-readable description of the first worsening lab trend
+    found (comparing the two most recent readings per tracked code), or None
+    if there isn't enough data or nothing is worsening."""
+    for loinc_code, label, direction in _LAB_WORSENING_DIRECTION:
+        readings = (
+            db.query(LabResult)
+            .filter(LabResult.patient_id == patient_id, LabResult.loinc_code == loinc_code)
+            .order_by(LabResult.observed_at.desc())
+            .limit(2)
+            .all()
+        )
+        if len(readings) < 2:
+            continue
+        latest, previous = readings[0], readings[1]
+        if direction == "rising" and latest.value > previous.value:
+            return f"{label} rose from {previous.value} to {latest.value}"
+        if direction == "falling" and latest.value < previous.value:
+            return f"{label} fell from {previous.value} to {latest.value}"
+    return None
 
 
 def correlate(patient_id, db: Session) -> dict:
@@ -95,6 +131,28 @@ def correlate(patient_id, db: Session) -> dict:
             chw_id     = patient.chw_id,
         )
         alert_created = True
+
+    # Pattern C: reports high adherence but lab results are trending the wrong way —
+    # only checked when neither A nor B already explains a discrepancy this cycle.
+    else:
+        worsening = _worsening_lab_trend(patient_id, db)
+        if adherence_pct >= 80 and worsening:
+            pattern     = "C"
+            description = (
+                f"Patient reports {adherence_pct:.0f}% adherence, but lab results show "
+                f"{worsening}. Possible treatment failure or drug resistance despite reported adherence."
+            )
+            recommended = "Facility provider should review for resistance testing or regimen change."
+            alert_utils.create_alert(
+                db,
+                alert_type = "CLINICAL_DISCREPANCY",
+                severity   = "WARNING",
+                title      = f"Pattern C — {patient.full_name}",
+                message    = description,
+                patient_id = patient_id,
+                chw_id     = patient.chw_id,
+            )
+            alert_created = True
 
     logger.info("Correlation for %s: Pattern %s", patient.full_name, pattern)
     return {

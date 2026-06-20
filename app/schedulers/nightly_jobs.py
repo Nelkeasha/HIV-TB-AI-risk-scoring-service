@@ -1,6 +1,8 @@
 """
 Scheduled AI jobs:
   23:00 daily  — risk scoring for all active patients
+  23:30 daily  — FHIR lab-result sync, then clinical correlation (adherence
+                 vs. pill count vs. lab trend) for all active patients
   06:00 daily  — priority lists for all CHWs
   Every 6 hrs  — cluster / early-warning detection
 
@@ -18,6 +20,7 @@ from app.services import (
     priority_list_service,
     cluster_detection_service,
     clinical_correlation_service,
+    lab_sync_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +66,12 @@ def _run_nightly_clinical_correlation():
     logger.info("Nightly clinical correlation job started")
     db = SessionLocal()
     try:
+        try:
+            new_labs = lab_sync_service.sync_all(db)
+            logger.info("Lab sync done — %d new result(s) stored", new_labs)
+        except Exception as e:
+            logger.warning("Lab sync failed, correlation will use existing data: %s", e)
+
         patients = db.query(Patient).filter(Patient.is_active == True).all()
         ok, err, flagged = 0, 0, 0
         for p in patients:
