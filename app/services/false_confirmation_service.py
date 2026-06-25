@@ -27,9 +27,12 @@ def analyze(patient_id, schedule_id, response_time_seconds: int,
 
     signals: list[str] = []
 
-    # Signal 1 — Timestamp anomaly
+    # Signal 1 — Timestamp anomaly, gated on having a real baseline.
+    # A patient's first couple of confirmations have nothing reliable to
+    # compare against — flagging them anyway (e.g. a fast first response)
+    # would be a false positive, not a detected anomaly.
     baseline = build_baseline(patient_id, db)
-    if is_anomalous(response_time_seconds, baseline):
+    if baseline["reliable"] and is_anomalous(response_time_seconds, baseline):
         signals.append(
             f"Response time {response_time_seconds}s is unusually fast "
             f"(patient baseline mean={baseline['mean']:.0f}s)"
@@ -73,8 +76,9 @@ def analyze(patient_id, schedule_id, response_time_seconds: int,
     )
     alert = None
     if log:
-        log.ai_suspicion_flag = is_suspicious
-        log.suspicion_reason  = "; ".join(signals) if signals else None
+        log.ai_suspicion_flag    = is_suspicious
+        log.suspicion_reason     = "; ".join(signals) if signals else None
+        log.baseline_established = baseline["reliable"]
         db.commit()
 
         if is_suspicious:

@@ -1,9 +1,15 @@
 """
 Monitors population-level adherence to detect early warning patterns.
 
-Geographic clustering  — >= 3 HIGH/CRITICAL patients in the same village/sector
-CHW-level clustering   — a single CHW has >= 3 HIGH/CRITICAL patients
-Temporal clustering    — facility-wide adherence dropped >= 20% in 7 days
+Geographic clustering    — >= 3 HIGH/CRITICAL patients in the same village/sector
+CHW-level clustering     — a single CHW has >= 3 HIGH/CRITICAL patients
+Temporal clustering      — facility-wide risk score rose >= 20% in 7 days
+Early-warning clustering — a single village's own adherence rate dropped
+                            >= 20% in 7 days, even if no patient there has
+                            individually crossed into HIGH/CRITICAL risk yet
+                            (catches a localized issue — e.g. a stockout or a
+                            CHW on leave — before it shows up village-by-village
+                            in the risk-score-based rules above)
 """
 
 from datetime import datetime, timedelta
@@ -12,6 +18,7 @@ from sqlalchemy import func
 from collections import defaultdict
 from app.models.patient import Patient
 from app.models.ai_risk_score import AiRiskScore
+from app.models.confirmation_log import ConfirmationLog
 from app.utils import alert_utils
 from app.core.config import settings
 import logging
@@ -125,6 +132,63 @@ def detect(db: Session) -> dict:
                 severity   = "CRITICAL",
                 title      = "System-Wide Risk Increase",
                 message    = f"Average patient risk score increased by {pct_change:.1f}% in the last 7 days.",
+            )
+
+    # ── Early-warning clustering (per-village adherence drop) ──────────────────
+    cutoff_8d  = datetime.now() - timedelta(days=8)
+    cutoff_15d = datetime.now() - timedelta(days=15)
+
+    village_patients = defaultdict(list)
+    for patient in db.query(Patient).filter(
+        Patient.village.isnot(None),
+        Patient.is_active.is_(True),
+        Patient.registration_status == "CONFIRMED",
+    ).all():
+        village_patients[patient.village].append(patient.id)
+
+    def village_adherence(patient_ids, cutoff_from, cutoff_to):
+        rows = (
+            db.query(ConfirmationLog)
+            .filter(
+                ConfirmationLog.patient_id.in_(patient_ids),
+                ConfirmationLog.scheduled_date.between(cutoff_from.date(), cutoff_to.date()),
+            )
+            .all()
+        )
+        if not rows:
+            return None
+        confirmed = sum(1 for r in rows if r.confirmed_at is not None)
+        return confirmed / len(rows)
+
+    for village, patient_ids in village_patients.items():
+        if len(patient_ids) < settings.cluster_min_patients:
+            continue
+
+        adherence_recent = village_adherence(patient_ids, cutoff_8d, datetime.now())
+        adherence_prior  = village_adherence(patient_ids, cutoff_15d, cutoff_8d)
+
+        if adherence_recent is None or adherence_prior is None or adherence_prior <= 0:
+            continue
+
+        pct_drop = ((adherence_prior - adherence_recent) / adherence_prior) * 100
+        if pct_drop >= settings.cluster_decline_percentage:
+            ids = [str(pid) for pid in patient_ids]
+            clusters.append({
+                "cluster_type":  "EARLY_WARNING_CLUSTER",
+                "description":   f"Adherence in {village} dropped {pct_drop:.1f}% over the last week",
+                "affected_count": len(ids),
+                "severity":      "WARNING",
+                "affected_ids":  ids,
+            })
+            alert_utils.create_alert(
+                db,
+                alert_type = "EARLY_WARNING",
+                severity   = "WARNING",
+                title      = f"Adherence Drop — {village}",
+                message    = (
+                    f"Average adherence across {len(ids)} patients in {village} fell from "
+                    f"{adherence_prior * 100:.0f}% to {adherence_recent * 100:.0f}% in the last 7 days."
+                ),
             )
 
     return {

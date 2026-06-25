@@ -22,7 +22,7 @@ def build(patient_id, db: Session) -> dict:
         ).all()
     ]
 
-    if len(times) < 3:
+    if len(times) < 14:
         return {"mean": 90.0, "std": 60.0, "n": len(times), "reliable": False}
 
     mean = float(np.mean(times))

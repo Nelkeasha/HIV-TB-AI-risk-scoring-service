@@ -32,7 +32,7 @@ from typing import Optional
 import httpx
 from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Date, Boolean
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, relationship
 
 from app.core.config import settings
 from app.core.database import SessionLocal, Base
@@ -55,13 +55,22 @@ log = logging.getLogger("fhir_sync")
 
 # ── Extra ORM models used only by this script ─────────────────────────────────
 
+class MedicationFormulary(Base):
+    __tablename__ = "medications_formulary"
+    __table_args__ = {"extend_existing": True}
+
+    id   = Column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(150), nullable=False)
+
+
 class TreatmentPlan(Base):
     __tablename__ = "treatment_plans"
     __table_args__ = {"extend_existing": True}
 
     id               = Column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id       = Column(PgUUID(as_uuid=True), ForeignKey("patients.id"), nullable=False)
-    medication_name  = Column(String(100), nullable=False)
+    medication_id    = Column(PgUUID(as_uuid=True), ForeignKey("medications_formulary.id"), nullable=False)
+    medication       = relationship("MedicationFormulary")
     dosage           = Column(String(50), nullable=False)
     frequency        = Column(String(50), nullable=False)
     start_date       = Column(Date)
@@ -223,8 +232,8 @@ def build_fhir_care_plan(plan: TreatmentPlan, patient_fhir_id: str) -> dict:
         "status": "active" if plan.is_active else "completed",
         "intent": "plan",
         "subject": {"reference": f"Patient/{patient_fhir_id}"},
-        "title": plan.medication_name,
-        "description": f"{plan.medication_name} — {plan.dosage} — {plan.frequency}",
+        "title": plan.medication.name,
+        "description": f"{plan.medication.name} — {plan.dosage} — {plan.frequency}",
     }
     period: dict = {}
     if plan.start_date:

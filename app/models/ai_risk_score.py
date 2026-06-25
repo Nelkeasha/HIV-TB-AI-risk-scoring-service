@@ -23,6 +23,7 @@ class AiRiskScore(Base):
     pill_count_discrepancy_detected = Column(Boolean, default=False)
     window_violation_detected       = Column(Boolean, default=False)
     recommended_action              = Column(Text)
+    baseline_observation_count      = Column(Integer, nullable=False, default=0)
     calculated_at                   = Column(DateTime)
 
     patient                         = relationship("Patient", back_populates="risk_scores")

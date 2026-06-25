@@ -5,6 +5,7 @@ from app.models.ai_risk_score import AiRiskScore
 from app.models.home_visit import HomeVisit
 from app.ml.features import risk_features
 from app.ml.models import risk_model
+from app.ml.models.baseline_model import build as build_baseline
 from app.utils import alert_utils
 from app.services import settings_service
 from app.core.config import settings
@@ -62,6 +63,7 @@ def calculate(patient_id, db: Session) -> dict:
     score, level = risk_model.predict(features)
     level       = _apply_threshold_overrides(score, db)
     pill_disc   = _pill_discrepancy_detected(patient_id, db)
+    baseline    = build_baseline(patient_id, db)
 
     recommended = _recommended_action(level, features)
 
@@ -80,6 +82,7 @@ def calculate(patient_id, db: Session) -> dict:
         pill_count_discrepancy_detected = pill_disc,
         window_violation_detected       = False,
         recommended_action              = recommended,
+        baseline_observation_count      = baseline["n"],
         calculated_at                   = datetime.now(),
     )
     db.add(entry)
@@ -87,9 +90,12 @@ def calculate(patient_id, db: Session) -> dict:
     db.refresh(entry)
 
     if level in ("HIGH", "CRITICAL"):
+        # alert_type is a Postgres enum (see Java AlertType) — "HIGH_RISK" is not
+        # a member of it and would fail the insert; EARLY_WARNING is the type
+        # reserved for AI-driven risk alerts, severity carries HIGH vs CRITICAL.
         alert_utils.create_alert(
             db,
-            alert_type  = "HIGH_RISK" if level == "HIGH" else "EARLY_WARNING",
+            alert_type  = "EARLY_WARNING",
             severity    = "WARNING" if level == "HIGH" else "CRITICAL",
             title       = f"{level} Risk — {patient.full_name}",
             message     = f"Risk score {score:.1f}/100. {recommended}",

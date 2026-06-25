@@ -30,7 +30,10 @@ def _run_nightly_risk_scoring():
     logger.info("Nightly risk scoring job started")
     db = SessionLocal()
     try:
-        patients = db.query(Patient).filter(Patient.is_active == True).all()
+        patients = db.query(Patient).filter(
+            Patient.is_active == True,
+            Patient.registration_status == "CONFIRMED",
+        ).all()
         ok, err = 0, 0
         for p in patients:
             try:
@@ -50,7 +53,10 @@ def _run_morning_priority_lists():
     try:
         chw_ids = {
             p.chw_id
-            for p in db.query(Patient.chw_id).filter(Patient.is_active == True).distinct()
+            for p in db.query(Patient.chw_id).filter(
+                Patient.is_active == True,
+                Patient.registration_status == "CONFIRMED",
+            ).distinct()
         }
         for chw_id in chw_ids:
             try:
@@ -72,7 +78,10 @@ def _run_nightly_clinical_correlation():
         except Exception as e:
             logger.warning("Lab sync failed, correlation will use existing data: %s", e)
 
-        patients = db.query(Patient).filter(Patient.is_active == True).all()
+        patients = db.query(Patient).filter(
+            Patient.is_active == True,
+            Patient.registration_status == "CONFIRMED",
+        ).all()
         ok, err, flagged = 0, 0, 0
         for p in patients:
             try:

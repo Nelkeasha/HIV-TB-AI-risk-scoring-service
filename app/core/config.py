@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     risk_score_threshold_high: int = 70
     risk_score_threshold_critical: int = 85
     cluster_min_patients: int = 3
-    cluster_decline_percentage: int = 20
+    cluster_decline_percentage: int = 15
 
     nightly_risk_score_hour: int = 23
     morning_priority_list_hour: int = 6

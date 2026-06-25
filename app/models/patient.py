@@ -29,6 +29,7 @@ class Patient(Base):
     fhir_patient_id       = Column(String(100), unique=True)
     sync_status           = Column(String(20), default="PENDING")
     is_active             = Column(Boolean, default=True)
+    registration_status   = Column(String(20), default="PROVISIONAL")
     created_at            = Column(DateTime)
     updated_at            = Column(DateTime)
 

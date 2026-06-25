@@ -23,6 +23,7 @@ class ConfirmationLog(Base):
     is_missed           = Column(Boolean, nullable=False, default=False)
     ai_suspicion_flag   = Column(Boolean, nullable=False, default=False)
     suspicion_reason    = Column(String(100))
+    baseline_established = Column(Boolean, nullable=False, default=False)
     created_at          = Column(DateTime)
 
     patient             = relationship("Patient", back_populates="confirmation_logs")

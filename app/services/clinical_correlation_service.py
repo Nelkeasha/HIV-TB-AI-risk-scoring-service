@@ -11,6 +11,17 @@ Pattern C — High reported adherence (>= 80%) BUT lab trend is worsening
             (rising HIV viral load, or falling CD4 count). Suggests possible
             treatment failure or drug resistance despite reported adherence —
             pill-count verification alone wouldn't catch this (REQ-13).
+
+Pattern D (CLINICAL_DISCREPANCY) — 30-day adherence > 90% BUT latest HIV viral
+            load > 1000 copies/mL. Per WHO/Rwanda-MOH virologic failure
+            guidance, viral non-suppression despite reported high adherence is
+            itself a discrepancy worth a clinical review, independent of
+            whether a worsening *trend* (Pattern C) can be established yet.
+
+Pattern E (TREATMENT_FAILURE_RISK) — Two consecutive HIV viral load readings
+            both > 50 copies/mL (i.e. not virologically suppressed twice in a
+            row). This is the strongest lab-only signal of treatment failure
+            and is raised regardless of reported adherence.
 """
 
 from sqlalchemy.orm import Session
@@ -52,6 +63,45 @@ def _worsening_lab_trend(patient_id, db: Session) -> str | None:
         if direction == "falling" and latest.value < previous.value:
             return f"{label} fell from {previous.value} to {latest.value}"
     return None
+
+
+def _latest_viral_load(patient_id, db: Session):
+    """Most recent HIV viral load LabResult row, or None if no reading exists."""
+    return (
+        db.query(LabResult)
+        .filter(LabResult.patient_id == patient_id, LabResult.loinc_code == settings.loinc_viral_load)
+        .order_by(LabResult.observed_at.desc())
+        .first()
+    )
+
+
+def _last_two_viral_loads(patient_id, db: Session) -> list:
+    """The two most recent HIV viral load readings (newest first), or fewer if
+    there isn't enough lab history yet."""
+    return (
+        db.query(LabResult)
+        .filter(LabResult.patient_id == patient_id, LabResult.loinc_code == settings.loinc_viral_load)
+        .order_by(LabResult.observed_at.desc())
+        .limit(2)
+        .all()
+    )
+
+
+def _adherence_pct_over(patient_id, db: Session, num_days: int) -> float:
+    """Rolling adherence over the most recent `num_days` daily MedicationRecord
+    rows (one row per patient per plan per day) — same aggregation as the
+    7-day window below, parameterized for the 30-day window REQ-13's viral
+    load rules are defined against."""
+    records = (
+        db.query(MedicationRecord)
+        .filter(MedicationRecord.patient_id == patient_id)
+        .order_by(MedicationRecord.period_end.desc())
+        .limit(num_days)
+        .all()
+    )
+    total_scheduled = sum(r.doses_scheduled for r in records)
+    total_confirmed = sum(r.doses_confirmed for r in records)
+    return (total_confirmed / total_scheduled * 100) if total_scheduled else 0.0
 
 
 def correlate(patient_id, db: Session) -> dict:
@@ -153,6 +203,60 @@ def correlate(patient_id, db: Session) -> dict:
                 chw_id     = patient.chw_id,
             )
             alert_created = True
+
+    # Pattern D and E are evaluated independently of A/B/C above — they're a
+    # direct lab-threshold signal, not a discrepancy between two indirect
+    # adherence proxies, so they fire even when A/B/C already explained
+    # something else this cycle (or explained nothing).
+    extra_patterns = []
+
+    adherence_30d = _adherence_pct_over(patient_id, db, 30)
+    latest_vl = _latest_viral_load(patient_id, db)
+    if adherence_30d > 90 and latest_vl is not None and float(latest_vl.value) > 1000:
+        d_description = (
+            f"Patient's 30-day adherence is {adherence_30d:.0f}%, but the latest HIV "
+            f"viral load is {latest_vl.value} copies/mL (not virologically suppressed). "
+            "Possible treatment failure despite reported high adherence."
+        )
+        alert_utils.create_alert(
+            db,
+            alert_type = "CLINICAL_DISCREPANCY",
+            severity   = "WARNING",
+            title      = f"Pattern D — {patient.full_name}",
+            message    = d_description,
+            patient_id = patient_id,
+            chw_id     = patient.chw_id,
+        )
+        extra_patterns.append(("D", d_description))
+        alert_created = True
+
+    recent_vls = _last_two_viral_loads(patient_id, db)
+    if len(recent_vls) == 2 and all(float(r.value) > 50 for r in recent_vls):
+        e_description = (
+            f"Two consecutive HIV viral load readings are both above 50 copies/mL "
+            f"({recent_vls[1].value} then {recent_vls[0].value}) — patient is not "
+            "virologically suppressed. High risk of treatment failure or drug resistance."
+        )
+        alert_utils.create_alert(
+            db,
+            alert_type = "TREATMENT_FAILURE_RISK",
+            severity   = "CRITICAL",
+            title      = f"Treatment Failure Risk — {patient.full_name}",
+            message    = e_description,
+            patient_id = patient_id,
+            chw_id     = patient.chw_id,
+        )
+        extra_patterns.append(("E", e_description))
+        alert_created = True
+
+    if extra_patterns:
+        if pattern == "NONE":
+            pattern, description = extra_patterns[0]
+            if len(extra_patterns) > 1:
+                pattern = "+".join(p for p, _ in extra_patterns)
+        else:
+            pattern = pattern + "+" + "+".join(p for p, _ in extra_patterns)
+            description = description + " " + " ".join(d for _, d in extra_patterns)
 
     logger.info("Correlation for %s: Pattern %s", patient.full_name, pattern)
     return {
