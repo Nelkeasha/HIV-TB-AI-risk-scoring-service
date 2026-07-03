@@ -5,8 +5,16 @@ Reads PENDING records from PostgreSQL, pushes them to a HAPI FHIR R4 server,
 then reports the assigned FHIR IDs back to Spring Boot so records are marked SYNCED.
 
 Usage:
-  python fhir_sync.py               # live run
-  python fhir_sync.py --dry-run     # builds FHIR JSON, skips all HTTP calls
+  python fhir_sync.py                    # standalone live run (opens + closes its own session)
+  python fhir_sync.py --dry-run          # builds FHIR JSON, skips all HTTP calls
+  python fhir_sync.py --log-id <uuid>    # completes the session opened by the app's
+                                         # "Trigger Sync" button (POST /api/chw/sync/trigger)
+
+Idempotency: every resource is POSTed with a FHIR If-None-Exist conditional
+create keyed by a stable business identifier (patient-code / local UUID), so
+re-running never creates duplicate FHIR resources. If the Spring-Boot callback
+fails after resources are stored in HAPI, entities are marked SYNCED directly in
+Postgres so the next run does not re-POST them.
 
 Required .env vars (beyond the AI service defaults):
   FHIR_SERVER_URL       — e.g. http://localhost:8090/fhir
@@ -185,6 +193,8 @@ def build_fhir_observation(visit: HomeVisit, patient_fhir_id: str) -> dict:
 
     resource: dict = {
         "resourceType": "Observation",
+        # Stable business identifier — lets HAPI conditional-create dedupe on re-runs.
+        "identifier": [{"system": "urn:hivtb:homevisit-id", "value": str(visit.id)}],
         "status": "final",
         "code": {
             "coding": [{
@@ -206,6 +216,8 @@ def build_fhir_observation(visit: HomeVisit, patient_fhir_id: str) -> dict:
 def build_fhir_medication_statement(record: MedicationRecord, patient_fhir_id: str) -> dict:
     return {
         "resourceType": "MedicationStatement",
+        # Stable business identifier — lets HAPI conditional-create dedupe on re-runs.
+        "identifier": [{"system": "urn:hivtb:medrecord-id", "value": str(record.id)}],
         "status": "active",
         "subject": {"reference": f"Patient/{patient_fhir_id}"},
         "medicationCodeableConcept": {"text": "HIV/TB Antiretroviral / TB Treatment"},
@@ -229,6 +241,8 @@ def build_fhir_medication_statement(record: MedicationRecord, patient_fhir_id: s
 def build_fhir_care_plan(plan: TreatmentPlan, patient_fhir_id: str) -> dict:
     resource: dict = {
         "resourceType": "CarePlan",
+        # Stable business identifier — lets HAPI conditional-create dedupe on re-runs.
+        "identifier": [{"system": "urn:hivtb:treatmentplan-id", "value": str(plan.id)}],
         "status": "active" if plan.is_active else "completed",
         "intent": "plan",
         "subject": {"reference": f"Patient/{patient_fhir_id}"},
@@ -247,24 +261,61 @@ def build_fhir_care_plan(plan: TreatmentPlan, patient_fhir_id: str) -> dict:
 
 # ── FHIR HTTP helper ──────────────────────────────────────────────────────────
 
+def _extract_id_from_location(location: str, resource_type: str) -> Optional[str]:
+    """Pull the resource id out of a Location header like
+    'http://host/fhir/Patient/123/_history/1' → '123'."""
+    if not location:
+        return None
+    parts = location.rstrip("/").split("/")
+    if resource_type in parts:
+        idx = parts.index(resource_type)
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
+
+
 def post_to_fhir(
-    client: httpx.Client, resource_type: str, body: dict, dry_run: bool
+    client: httpx.Client,
+    resource_type: str,
+    body: dict,
+    dry_run: bool,
+    dedupe_identifier: Optional[str] = None,
 ) -> str:
-    """POST a FHIR resource, return the assigned FHIR ID."""
+    """POST a FHIR resource, return the assigned FHIR ID.
+
+    When ``dedupe_identifier`` (``system|value``) is given, sends the FHIR
+    ``If-None-Exist`` header so HAPI performs a conditional create — a re-run
+    reuses the existing resource instead of creating a duplicate.
+    """
     if dry_run:
         fake_id = str(uuid.uuid4())[:8]
         log.info("    [dry-run] %s → fake-id: %s", resource_type, fake_id)
         return fake_id
 
+    headers = {
+        "Content-Type": "application/fhir+json",
+        "Accept": "application/fhir+json",
+    }
+    if dedupe_identifier:
+        headers["If-None-Exist"] = f"identifier={dedupe_identifier}"
+
     url = f"{settings.fhir_server_url}/{resource_type}"
-    resp = client.post(
-        url,
-        json=body,
-        headers={"Content-Type": "application/fhir+json", "Accept": "application/fhir+json"},
-        timeout=20,
-    )
+    resp = client.post(url, json=body, headers=headers, timeout=20)
     resp.raise_for_status()
-    fhir_id = resp.json().get("id")
+
+    # HAPI usually returns the resource body (with id), but for some create
+    # configurations the id only comes back in the Location/Content-Location
+    # header — fall back to parsing that.
+    fhir_id = None
+    try:
+        fhir_id = resp.json().get("id")
+    except Exception:
+        fhir_id = None
+    if not fhir_id:
+        fhir_id = _extract_id_from_location(
+            resp.headers.get("Location") or resp.headers.get("Content-Location", ""),
+            resource_type,
+        )
     if not fhir_id:
         raise ValueError(f"HAPI FHIR returned no id: {resp.text[:300]}")
     return fhir_id
@@ -272,7 +323,7 @@ def post_to_fhir(
 
 # ── Main sync ─────────────────────────────────────────────────────────────────
 
-def run_sync(dry_run: bool = False) -> None:
+def run_sync(dry_run: bool = False, existing_log_id: Optional[str] = None) -> None:
     db: Session = SessionLocal()
     errors: list[str] = []
 
@@ -289,13 +340,35 @@ def run_sync(dry_run: bool = False) -> None:
             len(pending_patients), len(pending_visits), len(pending_records), len(pending_plans), total,
         )
 
+        # 2. Resolve the sync session.
+        #    --log-id → complete the IN_PROGRESS log the Spring "Trigger Sync"
+        #    endpoint already opened (so it doesn't dangle forever). Otherwise
+        #    this is a standalone/cron run and we open our own session row.
+        if existing_log_id:
+            log_id = uuid.UUID(existing_log_id)
+            if not dry_run:
+                row = db.query(FhirSyncLog).filter(FhirSyncLog.id == log_id).first()
+                if row is None:
+                    raise ValueError(f"--log-id {log_id} not found in fhir_sync_logs")
+                log.info("Completing existing trigger session: logId=%s (was %s)", log_id, row.sync_status)
+            else:
+                log.info("[dry-run] would complete existing session logId=%s", log_id)
+        else:
+            log_id = uuid.uuid4()
+
         if total == 0:
-            log.info("Nothing to sync. Exiting.")
+            log.info("Nothing to sync.")
+            # A trigger-opened session must still be closed, or it stays IN_PROGRESS.
+            if existing_log_id and not dry_run:
+                _notify_spring_boot(
+                    log_id=log_id, final_status="COMPLETED", synced=0, failed=0,
+                    error_log=None, patient_fhir_ids={}, visit_fhir_ids={},
+                    record_fhir_ids={}, plan_fhir_ids={}, db=db,
+                )
             return
 
-        # 2. Open a sync session row directly in the DB
-        log_id = uuid.uuid4()
-        if not dry_run:
+        # 3. For a standalone run, open a sync session row directly in the DB.
+        if not existing_log_id and not dry_run:
             sync_log = FhirSyncLog(
                 id=log_id,
                 sync_started_at=datetime.utcnow(),
@@ -305,7 +378,7 @@ def run_sync(dry_run: bool = False) -> None:
             db.add(sync_log)
             db.commit()
             log.info("Sync session opened: logId=%s", log_id)
-        else:
+        elif dry_run:
             log.info("[dry-run] logId=%s (not persisted)", log_id)
 
         # 3. Push resources to HAPI FHIR
@@ -319,7 +392,11 @@ def run_sync(dry_run: bool = False) -> None:
             # Patients must come first — other resources reference their FHIR IDs
             for p in pending_patients:
                 try:
-                    fhir_id = post_to_fhir(fhir_client, "Patient", build_fhir_patient(p), dry_run)
+                    dedupe = f"urn:hivtb:patient-code|{p.patient_code}" if p.patient_code else None
+                    fhir_id = post_to_fhir(
+                        fhir_client, "Patient", build_fhir_patient(p), dry_run,
+                        dedupe_identifier=dedupe,
+                    )
                     patient_fhir_ids[str(p.id)] = fhir_id
                     synced += 1
                     log.info("  Patient %-15s → Patient/%s", p.patient_code, fhir_id)
@@ -341,7 +418,10 @@ def run_sync(dry_run: bool = False) -> None:
                     log.warning("  HomeVisit %s skipped (patient FHIR id unknown)", v.id)
                     continue
                 try:
-                    fhir_id = post_to_fhir(fhir_client, "Observation", build_fhir_observation(v, pfhir), dry_run)
+                    fhir_id = post_to_fhir(
+                        fhir_client, "Observation", build_fhir_observation(v, pfhir), dry_run,
+                        dedupe_identifier=f"urn:hivtb:homevisit-id|{v.id}",
+                    )
                     visit_fhir_ids[str(v.id)] = fhir_id
                     synced += 1
                     log.info("  HomeVisit  %s → Observation/%s", v.id, fhir_id)
@@ -359,6 +439,7 @@ def run_sync(dry_run: bool = False) -> None:
                     fhir_id = post_to_fhir(
                         fhir_client, "MedicationStatement",
                         build_fhir_medication_statement(r, pfhir), dry_run,
+                        dedupe_identifier=f"urn:hivtb:medrecord-id|{r.id}",
                     )
                     record_fhir_ids[str(r.id)] = fhir_id
                     synced += 1
@@ -377,6 +458,7 @@ def run_sync(dry_run: bool = False) -> None:
                     fhir_id = post_to_fhir(
                         fhir_client, "CarePlan",
                         build_fhir_care_plan(tp, pfhir), dry_run,
+                        dedupe_identifier=f"urn:hivtb:treatmentplan-id|{tp.id}",
                     )
                     plan_fhir_ids[str(tp.id)] = fhir_id
                     synced += 1
@@ -461,8 +543,31 @@ def _notify_spring_boot(
             final_status, synced, failed,
         )
     except Exception as exc:
-        log.error("Failed to notify Spring Boot (%s). Updating sync log directly in DB.", exc)
-        # Fallback: update the sync log row we created directly
+        log.error("Failed to notify Spring Boot (%s). Updating entities + sync log directly in DB.", exc)
+        # Fallback: mark each entity SYNCED with its FHIR id directly, so HAPI and
+        # Postgres don't drift. Without this, resources already POSTed to HAPI would
+        # stay PENDING locally and get re-POSTed (duplicated) on the next run.
+        for id_str, fhir_id in patient_fhir_ids.items():
+            p = db.query(Patient).filter(Patient.id == uuid.UUID(id_str)).first()
+            if p:
+                p.fhir_patient_id = fhir_id
+                p.sync_status = "SYNCED"
+        for id_str, fhir_id in visit_fhir_ids.items():
+            v = db.query(HomeVisit).filter(HomeVisit.id == uuid.UUID(id_str)).first()
+            if v:
+                v.fhir_observation_id = fhir_id
+                v.sync_status = "SYNCED"
+        for id_str, fhir_id in record_fhir_ids.items():
+            r = db.query(MedicationRecord).filter(MedicationRecord.id == int(id_str)).first()
+            if r:
+                r.fhir_statement_id = fhir_id
+                r.sync_status = "SYNCED"
+        for id_str, fhir_id in plan_fhir_ids.items():
+            tp = db.query(TreatmentPlan).filter(TreatmentPlan.id == uuid.UUID(id_str)).first()
+            if tp:
+                tp.fhir_care_plan_id = fhir_id
+                tp.sync_status = "SYNCED"
+        # And update the sync log row we created directly.
         row = db.query(FhirSyncLog).filter(FhirSyncLog.id == log_id).first()
         if row:
             row.sync_status       = final_status
@@ -470,7 +575,7 @@ def _notify_spring_boot(
             row.records_failed    = failed
             row.sync_completed_at = datetime.utcnow()
             row.error_log         = (error_log or "") + f"\n[notify_error] {exc}"
-            db.commit()
+        db.commit()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -484,5 +589,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Read DB and build FHIR JSON without making any HTTP calls",
     )
+    parser.add_argument(
+        "--log-id",
+        default=None,
+        help="Complete this existing IN_PROGRESS FhirSyncLog (the id returned by "
+             "POST /api/chw/sync/trigger) instead of opening a new session",
+    )
     args = parser.parse_args()
-    run_sync(dry_run=args.dry_run)
+    run_sync(dry_run=args.dry_run, existing_log_id=args.log_id)
