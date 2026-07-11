@@ -38,7 +38,7 @@ from datetime import datetime, date
 from typing import Optional
 
 import httpx
-from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Date, Boolean
+from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Date, Boolean, Table
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Session, relationship
 
@@ -52,6 +52,16 @@ from app.models.medication_record import MedicationRecord
 # app's startup where all models normally get registered together.
 from app.models.confirmation_log import ConfirmationLog  # noqa: F401
 from app.models.ai_risk_score import AiRiskScore  # noqa: F401
+
+# The mapped models carry FKs to tables this service has no models for
+# (facilities, chws, system_users, dose_schedules). SQLAlchemy must be able to
+# resolve those FK targets in its metadata whenever it FLUSHES a Patient /
+# HomeVisit update — which is exactly what the Spring-notify-failure fallback
+# does when it writes SYNCED statuses directly to the database. Register
+# minimal stubs so that fallback path can commit.
+for _stub in ("facilities", "chws", "system_users", "dose_schedules"):
+    if _stub not in Base.metadata.tables:
+        Table(_stub, Base.metadata, Column("id", PgUUID(as_uuid=True), primary_key=True))
 
 logging.basicConfig(
     level=logging.INFO,
