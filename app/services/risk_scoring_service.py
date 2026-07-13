@@ -93,7 +93,9 @@ def calculate(patient_id, db: Session) -> dict:
         # alert_type is a Postgres enum (see Java AlertType) — "HIGH_RISK" is not
         # a member of it and would fail the insert; EARLY_WARNING is the type
         # reserved for AI-driven risk alerts, severity carries HIGH vs CRITICAL.
-        alert_utils.create_alert(
+        # One living alert per patient: re-scoring updates it in place rather
+        # than stacking a new alert per run.
+        alert_utils.upsert_patient_alert(
             db,
             alert_type  = "EARLY_WARNING",
             severity    = "WARNING" if level == "HIGH" else "CRITICAL",
@@ -102,6 +104,10 @@ def calculate(patient_id, db: Session) -> dict:
             patient_id  = patient_id,
             chw_id      = patient.chw_id,
         )
+    else:
+        # Risk dropped below HIGH — close the living risk alert so it doesn't
+        # linger after the patient improves.
+        alert_utils.resolve_patient_alerts(db, "EARLY_WARNING", patient_id)
 
     logger.info("Scored %s: %.1f (%s)", patient.full_name, score, level)
     return {
